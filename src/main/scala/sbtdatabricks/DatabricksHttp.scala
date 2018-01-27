@@ -17,34 +17,35 @@
 package sbtdatabricks
 
 import java.io.PrintStream
-
-import scala.util.control.NonFatal
+import java.net.URI
+import java.security.cert.X509Certificate
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.fasterxml.jackson.module.scala.experimental.ScalaObjectMapper
-
-import org.apache.http.{HttpEntity, StatusLine, HttpResponse}
+import org.apache.http._
 import org.apache.http.auth.{AuthScope, UsernamePasswordCredentials}
-import org.apache.http.client.{HttpResponseException, HttpClient}
 import org.apache.http.client.entity.UrlEncodedFormEntity
 import org.apache.http.client.methods._
+import org.apache.http.client.protocol.HttpClientContext
 import org.apache.http.client.utils.URLEncodedUtils
-import org.apache.http.conn.ssl.{SSLConnectionSocketFactory, TrustSelfSignedStrategy, SSLContextBuilder}
+import org.apache.http.client.{HttpClient, HttpResponseException}
+import org.apache.http.conn.ssl.{SSLConnectionSocketFactory, SSLContextBuilder, TrustStrategy}
 import org.apache.http.entity.StringEntity
-import org.apache.http.entity.mime.MultipartEntity
 import org.apache.http.entity.mime.content.{FileBody, StringBody}
-import org.apache.http.impl.client.{BasicCredentialsProvider, HttpClients}
+import org.apache.http.entity.mime.{MultipartEntity, MultipartEntityBuilder}
+import org.apache.http.impl.auth.BasicScheme
+import org.apache.http.impl.client.{BasicAuthCache, BasicCredentialsProvider, HttpClients}
 import org.apache.http.message.BasicNameValuePair
 import org.apache.http.util.EntityUtils
-
 import sbt._
-import scala.collection.JavaConversions._
-import scala.collection.mutable.ArrayBuffer
-
 import sbtdatabricks.DatabricksPlugin.ClusterName
 import sbtdatabricks.DatabricksPlugin.autoImport.DBC_ALL_CLUSTERS
 import sbtdatabricks.util.requests._
+
+import scala.collection.JavaConversions._
+import scala.collection.mutable.ArrayBuffer
+import scala.util.control.NonFatal
 
 /** Collection of REST calls to Databricks Cloud and related helper functions. Exposed for tests */
 class DatabricksHttp(
@@ -163,16 +164,19 @@ class DatabricksHttp(
       folder: String): UploadedLibraryId = {
     outputStream.println(s"Uploading $name")
     val post = new HttpPost(endpoint + LIBRARY_UPLOAD)
-    val entity = new MultipartEntity()
+    val entity = MultipartEntityBuilder.create()
 
-    entity.addPart("name", new StringBody(name))
-    entity.addPart("libType", new StringBody("scala"))
+    entity.addPart("libType", new StringBody("java-jar"))
     entity.addPart("folder", new StringBody(folder))
+    entity.addPart("name", new StringBody(name))
     entity.addPart("uri", new FileBody(file))
-    post.setEntity(entity)
+    entity.setLaxMode()
+    post.setEntity(entity.build())
+
     // jetty closes the connection if we don't set this header
     post.addHeader("Expect", "100-continue")
-    val response = client.execute(post)
+//    post.addHeader("Accept", "*/*")
+    val response = client.execute(post, DatabricksHttp.context)
     val stringResponse = handleResponse(response)
     mapper.readValue[UploadedLibraryId](stringResponse)
   }
@@ -186,7 +190,7 @@ class DatabricksHttp(
     val post = new HttpPost(endpoint + LIBRARY_DELETE)
     val form = List(new BasicNameValuePair("libraryId", libraryId))
     post.setEntity(new UrlEncodedFormEntity(form))
-    val response = client.execute(post)
+    val response = client.execute(post, DatabricksHttp.context)
     handleResponse(response)
   }
 
@@ -196,7 +200,7 @@ class DatabricksHttp(
    */
   private[sbtdatabricks] def fetchLibraries: Seq[LibraryListResult] = {
     val request = new HttpGet(endpoint + LIBRARY_LIST)
-    val response = client.execute(request)
+    val response = client.execute(request, DatabricksHttp.context)
     val stringResponse = handleResponse(response)
     mapper.readValue[Seq[LibraryListResult]](stringResponse)
   }
@@ -211,7 +215,7 @@ class DatabricksHttp(
     val form =
       URLEncodedUtils.format(List(new BasicNameValuePair("libraryId", libraryId)), "utf-8")
     val request = new HttpGet(endpoint + LIBRARY_STATUS + "?" + form)
-    val response = client.execute(request)
+    val response = client.execute(request, DatabricksHttp.context)
     val stringResponse = handleResponse(response)
     mapper.readValue[LibraryStatus](stringResponse)
   }
@@ -284,7 +288,7 @@ class DatabricksHttp(
       URLEncodedUtils.format(List(new BasicNameValuePair("clusterId", cluster.id),
                                   new BasicNameValuePair("contextId", contextId.id)), "utf-8")
     val request = new HttpGet(endpoint + CONTEXT_STATUS + "?" + form)
-    val response = client.execute(request)
+    val response = client.execute(request, DatabricksHttp.context)
     val responseString = handleResponse(response).trim
     val contextStatus = mapper.readValue[ContextStatus](responseString)
     outputStream.println(contextStatus.toString)
@@ -329,7 +333,7 @@ class DatabricksHttp(
     post.setEntity(entity)
     // jetty closes the connection if we don't set this header
     post.addHeader("Expect", "100-continue")
-    val response = client.execute(post)
+    val response = client.execute(post, DatabricksHttp.context)
     val responseString = handleResponse(response).trim
     mapper.readValue[CommandId](responseString)
   }
@@ -353,7 +357,7 @@ class DatabricksHttp(
                                   new BasicNameValuePair("contextId", contextId.id),
                                   new BasicNameValuePair("commandId", commandId.id)), "utf-8")
     val request = new HttpGet(endpoint + COMMAND_STATUS + "?" + form)
-    val response = client.execute(request)
+    val response = client.execute(request, DatabricksHttp.context)
     val responseString = handleResponse(response).trim
     val commandStatus = mapper.readValue[CommandStatus](responseString)
     outputStream.println(commandStatus.toString)
@@ -393,7 +397,7 @@ class DatabricksHttp(
    */
   private[sbtdatabricks] def fetchClusters: Seq[Cluster] = {
     val request = new HttpGet(endpoint + CLUSTER_LIST)
-    val response = client.execute(request)
+    val response = client.execute(request, DatabricksHttp.context)
     val stringResponse = handleResponse(response)
     mapper.readValue[Seq[Cluster]](stringResponse)
   }
@@ -407,7 +411,7 @@ class DatabricksHttp(
     val form =
       URLEncodedUtils.format(List(new BasicNameValuePair("clusterId", clusterId)), "utf-8")
     val request = new HttpGet(endpoint + CLUSTER_INFO + "?" + form)
-    val response = client.execute(request)
+    val response = client.execute(request, DatabricksHttp.context)
     val stringResponse = handleResponse(response)
     val cluster = mapper.readValue[Cluster](stringResponse)
     outputStream.println(cluster.toString)
@@ -458,7 +462,7 @@ class DatabricksHttp(
     outputStream.println(input.initialMessage)
     val post = new HttpPost(endpoint + input.dbAPIEndPoint)
     setJsonRequest(input.requestCC, post)
-    val response = client.execute(post)
+    val response = client.execute(post, DatabricksHttp.context)
     val responseString = handleResponse(response).trim
     mapper.readValue[T](responseString)
   }
@@ -471,12 +475,17 @@ class DatabricksHttp(
 }
 
 object DatabricksHttp {
+  private lazy val context: HttpClientContext = HttpClientContext.create()
 
   /** Create an SSL client to handle communication. */
-  private[sbtdatabricks] def getApiClient(username: String, password: String): HttpClient = {
+  private[sbtdatabricks] def getApiClient(endpoint: String,
+                                          username: String,
+                                          password: String): HttpClient = {
 
       val builder = new SSLContextBuilder()
-      builder.loadTrustMaterial(null, new TrustSelfSignedStrategy())
+      builder.loadTrustMaterial(null, new TrustStrategy() {
+        override def isTrusted(chain: Array[X509Certificate], authType: ClusterName): Boolean = true
+      })
       // TLSv1.2 is only available in Java 7 and above
       builder.useProtocol("TLSv1.2")
       val sslsf = new SSLConnectionSocketFactory(builder.build())
@@ -485,19 +494,28 @@ object DatabricksHttp {
       val credentials = new UsernamePasswordCredentials(username, password)
       provider.setCredentials(AuthScope.ANY, credentials)
 
-      val client =
-        HttpClients.custom()
-          .setSSLSocketFactory(sslsf)
-          .setDefaultCredentialsProvider(provider)
-          .build()
-      client
+      val authCache = new BasicAuthCache()
+      try {
+        val host = URI.create(endpoint).getHost
+        authCache.put(new HttpHost(host, -1, "https"), new BasicScheme())
+      } catch {
+        case _: Throwable =>
+      }
+
+      context.setCredentialsProvider(provider)
+      context.setAuthCache(authCache)
+
+      HttpClients.custom()
+        .setSSLSocketFactory(sslsf)
+        .setDefaultCredentialsProvider(provider)
+        .build()
   }
 
   private[sbtdatabricks] def apply(
       endpoint: String,
       username: String,
       password: String): DatabricksHttp = {
-    val cli = DatabricksHttp.getApiClient(username, password)
+    val cli = DatabricksHttp.getApiClient(endpoint, username, password)
     new DatabricksHttp(endpoint, cli)
   }
 

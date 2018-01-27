@@ -2,6 +2,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import com.fasterxml.jackson.module.scala.experimental.ScalaObjectMapper
 import org.apache.http.entity.StringEntity
+import org.apache.http.protocol.HttpCoreContext
 import org.apache.http.ProtocolVersion
 import org.apache.http.client.HttpClient
 import org.apache.http.client.methods.{HttpRequestBase, HttpPost, HttpUriRequest}
@@ -255,7 +256,7 @@ object TestBuild extends Build {
           }
         }
         val request = ArgumentCaptor.forClass(classOf[HttpPost])
-        verify(client, times(4)).execute(request.capture())
+        verify(client, times(4)).execute(request.capture(), any(classOf[HttpCoreContext]))
         Source.fromInputStream(request.getValue.getEntity.getContent).getLines().foreach { json =>
           if (!json.contains("__ALL_CLUSTERS")) sys.error("Attach wasn't made to __ALL_CLUSTERS")
         }
@@ -673,13 +674,14 @@ object TestBuild extends Build {
       mockReponse
     }
     when(client.execute(any[HttpRequestBase]())).thenReturn(mocks(0), mocks.drop(1): _*)
+    when(client.execute(any[HttpRequestBase](), any[HttpCoreContext]())).thenReturn(mocks(0), mocks.drop(1): _*)
 
     DatabricksHttp.testClient(client, file)
   }
 
   def verifyHeaderOnMultipartUpload(client: HttpClient): Unit = {
     val argCaptor = ArgumentCaptor.forClass(classOf[HttpRequestBase])
-    verify(client, atLeastOnce()).execute(argCaptor.capture())
+    verify(client, atLeastOnce()).execute(argCaptor.capture(), any(classOf[HttpCoreContext]))
     argCaptor.getAllValues().foreach {
       case post: HttpPost if post.getEntity.isInstanceOf[MultipartEntity] =>
         if (post.getFirstHeader("Expect").getValue() != "100-continue") {
